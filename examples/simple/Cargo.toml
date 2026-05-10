@@ -18,6 +18,9 @@ tracing-subscriber = { workspace = true }
 cuda = ["llama-cpp-2/cuda"]
 metal = ["llama-cpp-2/metal"]
 vulkan = ["llama-cpp-2/vulkan"]
+dynamic-link = ["llama-cpp-2/dynamic-link"]
+dynamic-backends = ["llama-cpp-2/dynamic-backends"]
+dynamic-backends-no-variants = ["llama-cpp-2/dynamic-backends-no-variants"]
 
 [lints]
 workspace = true

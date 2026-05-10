@@ -827,7 +827,9 @@ fn main() {
         let backends_dir = out_dir.join("backends");
         std::fs::create_dir_all(&backends_dir).unwrap();
         config.define("GGML_BACKEND_DL", "ON");
-        config.define("GGML_CPU_ALL_VARIANTS", "ON");
+        if !cfg!(feature = "dynamic-backends-no-variants") {
+            config.define("GGML_CPU_ALL_VARIANTS", "ON");
+        }
         config.define("GGML_BACKEND_DIR", backends_dir.to_str().unwrap());
         // BUILD_SHARED_LIBS=ON is already set above via the dynamic-link feature.
     }
@@ -1106,25 +1108,22 @@ fn main() {
             let filename = filename.to_str().unwrap();
             let dst = target_dir.join(filename);
             debug_log!("HARD LINK {} TO {}", asset.display(), dst.display());
-            if !dst.exists() {
-                std::fs::hard_link(asset.clone(), dst).unwrap();
-            }
+            let _ = std::fs::remove_file(&dst);
+            std::fs::hard_link(asset.clone(), &dst).unwrap();
 
             // Copy DLLs to examples as well
             if target_dir.join("examples").exists() {
                 let dst = target_dir.join("examples").join(filename);
                 debug_log!("HARD LINK {} TO {}", asset.display(), dst.display());
-                if !dst.exists() {
-                    std::fs::hard_link(asset.clone(), dst).unwrap();
-                }
+                let _ = std::fs::remove_file(&dst);
+                std::fs::hard_link(asset.clone(), &dst).unwrap();
             }
 
             // Copy DLLs to target/profile/deps as well for tests
             let dst = target_dir.join("deps").join(filename);
             debug_log!("HARD LINK {} TO {}", asset.display(), dst.display());
-            if !dst.exists() {
-                std::fs::hard_link(asset.clone(), dst).unwrap();
-            }
+            let _ = std::fs::remove_file(&dst);
+            std::fs::hard_link(asset.clone(), &dst).unwrap();
         }
     }
 }

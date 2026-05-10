@@ -171,6 +171,8 @@ fn main() -> Result<()> {
     send_logs_to_tracing(LogOptions::default().with_logs_enabled(verbose));
 
     // init LLM
+    #[cfg(any(feature = "dynamic-backends", feature = "dynamic-backends-no-variants"))]
+    llama_cpp_2::llama_backend::load_backends();
     let backend = LlamaBackend::init()?;
 
     if list_devices {
