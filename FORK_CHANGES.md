@@ -5,12 +5,17 @@
 
 ## 改动概览
 
-共修改 6 个文件，新增 1 个 feature。
+共修改 5 个文件，新增 1 个 feature，改进 backends 部署体验。
 
 ### 1. 新增 feature: `dynamic-backends-no-variants`
 
 基于 `dynamic-backends`，区别是不设置 CMake 的 `GGML_CPU_ALL_VARIANTS=ON`，
 只构建一个通用的 `libggml-cpu.so`，而不是为每种 CPU 微架构（haswell/zen4/...）各编译一份。
+
+`dynamic-backends-no-variants` 在 feature 层面自动激活 `dynamic-backends`，
+因此代码中只需 `#[cfg(feature = "dynamic-backends")]` 即可覆盖两种模式，
+不需要 `any(...)` 条件判断。唯一区分两者的是 `build.rs` 中
+`cfg!(feature = "dynamic-backends-no-variants")` 控制 `GGML_CPU_ALL_VARIANTS` 开关。
 
 **修改文件链：**
 
@@ -24,13 +29,39 @@
 
 | 文件 | 改动 |
 |------|------|
-| `llama-cpp-sys-2/build.rs:830` | `GGML_CPU_ALL_VARIANTS` 条件化，`no-variants` 时不设置 |
-| `llama-cpp-2/src/llama_backend.rs:186,193,204` | `#[cfg(feature = "dynamic-backends")]` → `#[cfg(any(feature = "dynamic-backends", feature = "dynamic-backends-no-variants"))]` |
-| `examples/simple/src/main.rs:174` | 添加 `load_backends()` 调用（`dynamic-backends` 模式必须） |
+| `llama-cpp-sys-2/build.rs:~830` | `GGML_CPU_ALL_VARIANTS` 条件化，`no-variants` 时不设置 |
+| `llama-cpp-2/src/llama_backend.rs` | 新增 `find_lib_dir()` + 重写 `load_backends()` 多策略搜索 |
+| `examples/simple/src/main.rs:~174` | 添加 `#[cfg(feature = "dynamic-backends")] load_backends()` 调用 |
 
-### 2. Bug 修复: build.rs hard_link 竞态条件
+### 2. Backends 与共享库统一目录部署
 
-`llama-cpp-sys-2/build.rs` 第 1108-1128 行：
+**原问题：** 上游将 backends 安装到 `out/backends/` 子目录，需要单独设置 `LD_LIBRARY_PATH` 指向 backends 目录，部署时需要两条路径配置。
+
+**改动：** 将 `GGML_BACKEND_DIR` 从 `out/backends/` 改为 `out/lib/`，使 backends 的 `.so` 文件（如 `libggml-cpu.so`）和 `libllama.so` 安装在同一目录。部署时只需一个 `LD_LIBRARY_PATH`。
+
+| 文件 | 改动 |
+|------|------|
+| `llama-cpp-sys-2/build.rs:~823` | `GGML_BACKEND_DIR` 改为 `out_dir.join("lib")` |
+| `llama-cpp-sys-2/build.rs:~846` | `cargo:backends_dir` 也改为 `out/lib/` |
+
+### 3. `load_backends()` 多策略自动发现
+
+`load_backends()` 现在按以下优先级查找 backends 目录：
+
+1. `GGML_BACKEND_PATH` 环境变量
+2. `libllama.so` 所在目录（通过 `dladdr` 自动检测，Unix 平台）
+3. 编译时嵌入的 `BACKENDS_DIR`
+
+这使得生产部署时无需额外配置 backends 路径——只要 `libggml-cpu.so` 等文件和 `libllama.so` 在同一目录（由上面的改动 2 保证），就会被自动发现。
+
+| 文件 | 改动 |
+|------|------|
+| `llama-cpp-2/src/llama_backend.rs` | 新增 `find_lib_dir()` 函数（Unix 上使用 `dladdr`） |
+| `llama-cpp-2/src/llama_backend.rs` | 重写 `load_backends()` 实现多策略搜索 |
+
+### 4. Bug 修复: build.rs hard_link 竞态条件
+
+`llama-cpp-sys-2/build.rs` 硬链接共享库部分：
 
 原代码用 `if !dst.exists() { hard_link() }` 模式复制共享库到 `target/release/`，
 在重复构建时 `exists()` 检查与 `hard_link()` 之间存在竞态，导致 `EEXIST` 错误。
@@ -43,19 +74,19 @@
 
 ### 上游合并时可能冲突的位置
 
-1. **`llama-cpp-sys-2/build.rs` 第 823-833 行**
+1. **`llama-cpp-sys-2/build.rs` 第 823-835 行**
    - `dynamic-backends` CMake 配置块
-   - 如果上游修改了此区域的 CMake 参数，需要保留 `GGML_CPU_ALL_VARIANTS` 的条件判断
+   - 我们改动：`GGML_BACKEND_DIR` 指向 `out/lib/` 而非 `out/backends/`
+   - 如果上游修改了此区域的 CMake 参数，需要保留我们的改动
 
 2. **`llama-cpp-sys-2/build.rs` 第 1108-1128 行**
    - hard_link 复制逻辑
    - 如果上游重构了这段代码（比如改用 `std::fs::copy`），合并时优先采用上游方式，
      但需确保也修复了 `EEXIST` 竞态问题
 
-3. **`llama-cpp-2/src/llama_backend.rs` 第 186-209 行**
-   - `#[cfg]` 条件
-   - 如果上游增加了新的 `#[cfg(feature = "dynamic-backends")]` 项，也需要加上
-     `any(feature = "dynamic-backends", feature = "dynamic-backends-no-variants")`
+3. **`llama-cpp-2/src/llama_backend.rs` 第 183-250 行**
+   - `#[cfg]` 条件、`find_lib_dir()`、`load_backends()` 重写
+   - 如果上游修改了此区域的 API，需要保留 dladdr 回退逻辑和 cfg 条件
 
 4. **`examples/simple/Cargo.toml` 和 `examples/simple/src/main.rs`**
    - 上游可能重构 example 结构或添加新 feature
@@ -84,7 +115,7 @@ cargo build --release -p simple --features dynamic-backends-no-variants
 
 ### 如果上游也修复了 hard_link 问题
 
-删除我们对 `build.rs` 第 1108-1128 行的改动，使用上游的修复即可。
+删除我们对 `build.rs` hard_link 部分的改动，使用上游的修复即可。
 
 ### 如果上游也添加了类似的 no-variants 功能
 
@@ -99,9 +130,8 @@ cargo build --release -p simple --features dynamic-backends
 # 不带 CPU 变体（新增，只构建通用版本）
 cargo build --release -p simple --features dynamic-backends-no-variants
 
-# 运行（需设置 LD_LIBRARY_PATH）
+# 运行（只需一个 LD_LIBRARY_PATH）
 LIB_DIR=$(ls -d target/release/build/llama-cpp-sys-2-*/out/lib | tail -1) \
-BACKENDS_DIR=$(ls -d target/release/build/llama-cpp-sys-2-*/out/backends | tail -1) \
-LD_LIBRARY_PATH="$LIB_DIR:$BACKENDS_DIR" \
+LD_LIBRARY_PATH="$LIB_DIR" \
 ./target/release/simple -p "你好" --n-len 64 local /path/to/model.gguf
 ```

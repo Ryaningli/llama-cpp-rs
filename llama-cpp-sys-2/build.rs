@@ -821,16 +821,15 @@ fn main() {
     }
 
     if cfg!(feature = "dynamic-backends") {
-        // Pre-create the backends directory so CMake can install MODULE libs there.
-        // GGML_BACKEND_DIR causes backends to install to this known path instead of
-        // CMAKE_INSTALL_BINDIR, making them easy to locate in downstream build scripts.
-        let backends_dir = out_dir.join("backends");
-        std::fs::create_dir_all(&backends_dir).unwrap();
+        // Install backend modules into the same directory as the shared libraries
+        // so that a single LD_LIBRARY_PATH covers everything at runtime.
         config.define("GGML_BACKEND_DL", "ON");
         if !cfg!(feature = "dynamic-backends-no-variants") {
             config.define("GGML_CPU_ALL_VARIANTS", "ON");
         }
-        config.define("GGML_BACKEND_DIR", backends_dir.to_str().unwrap());
+        let lib_dir = out_dir.join("lib");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        config.define("GGML_BACKEND_DIR", lib_dir.to_str().unwrap());
         // BUILD_SHARED_LIBS=ON is already set above via the dynamic-link feature.
     }
 
@@ -843,7 +842,7 @@ fn main() {
     let build_dir = config.build();
 
     if cfg!(feature = "dynamic-backends") {
-        println!("cargo:backends_dir={}", out_dir.join("backends").display());
+        println!("cargo:backends_dir={}", out_dir.join("lib").display());
     }
 
     // Build mtmd directly with cc::Build, bypassing the cmake tools build.

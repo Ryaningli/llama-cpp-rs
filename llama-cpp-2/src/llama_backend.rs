@@ -183,28 +183,98 @@ impl Drop for LlamaBackend {
 /// Compile-time path to the built GGML backend modules directory.
 /// Populated by build.rs from `DEP_LLAMA_BACKENDS_DIR` (emitted by llama-cpp-sys-2).
 /// None on static builds or when the feature is disabled.
-#[cfg(any(feature = "dynamic-backends", feature = "dynamic-backends-no-variants"))]
+#[cfg(feature = "dynamic-backends")]
 pub const BACKENDS_DIR: Option<&str> = option_env!("GGML_BACKENDS_DIR");
 
 /// Load GGML backend modules from the given directory.
 ///
 /// Call this before [`LlamaBackend::init`] to enable runtime hardware selection
 /// (Vulkan, CPU-AVX512, CPU-AVX2, etc.) when built with the `dynamic-backends` feature.
-#[cfg(any(feature = "dynamic-backends", feature = "dynamic-backends-no-variants"))]
+#[cfg(feature = "dynamic-backends")]
 pub fn load_backends_from_path(path: &std::path::Path) {
     let s = std::ffi::CString::new(path.to_str().expect("path must be valid UTF-8"))
         .expect("path must not contain null bytes");
     unsafe { llama_cpp_sys_2::ggml_backend_load_all_from_path(s.as_ptr()) }
 }
 
-/// Load GGML backend modules from the compile-time default directory ([`BACKENDS_DIR`]).
+/// Try to find the directory containing the shared library that exports `llama_backend_init`.
+/// On Unix this uses `dladdr`; returns `None` on failure or unsupported platforms.
+#[cfg(feature = "dynamic-backends")]
+fn find_lib_dir() -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CStr;
+        use std::os::raw::c_void;
+
+        #[repr(C)]
+        struct DlInfo {
+            dli_fname: *const std::os::raw::c_char,
+            _dli_fbase: *const c_void,
+            _dli_sname: *const std::os::raw::c_char,
+            _dli_saddr: *const c_void,
+        }
+
+        extern "C" {
+            fn dladdr(addr: *const c_void, info: *mut DlInfo) -> i32;
+        }
+
+        let mut info = std::mem::MaybeUninit::<DlInfo>::uninit();
+        let sym = llama_cpp_sys_2::llama_backend_init as *const c_void;
+        let ok = unsafe { dladdr(sym, info.as_mut_ptr()) };
+        if ok == 0 {
+            return None;
+        }
+        let info = unsafe { info.assume_init() };
+        if info.dli_fname.is_null() {
+            return None;
+        }
+        let cstr = unsafe { CStr::from_ptr(info.dli_fname) };
+        let path = std::path::PathBuf::from(cstr.to_str().ok()?);
+        path.parent().map(|p| p.to_path_buf())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Load GGML backend modules using a multi-strategy search:
 ///
-/// This is a no-op when `BACKENDS_DIR` is `None` (static builds or development builds
-/// that have not set `GGML_BACKENDS_DIR`).
-#[cfg(any(feature = "dynamic-backends", feature = "dynamic-backends-no-variants"))]
+/// 1. `GGML_BACKEND_PATH` environment variable (if set)
+/// 2. Same directory as `libllama.so` (auto-detected via `dladdr` on Unix)
+/// 3. Compile-time [`BACKENDS_DIR`] (from build output)
+///
+/// All strategies point to a single directory that contains both `libllama.so`
+/// and the backend modules (`libggml-cpu.so`, etc.), so a single
+/// `LD_LIBRARY_PATH` is sufficient.
+///
+/// This is a no-op when no backends directory can be found.
+#[cfg(feature = "dynamic-backends")]
 pub fn load_backends() {
+    // Strategy 1: explicit environment variable
+    if let Ok(dir) = std::env::var("GGML_BACKEND_PATH") {
+        let path = std::path::Path::new(&dir);
+        if path.is_dir() {
+            load_backends_from_path(path);
+            return;
+        }
+    }
+
+    // Strategy 2: same directory as the shared library (dladdr on Unix)
+    if let Some(lib_dir) = find_lib_dir() {
+        if lib_dir.is_dir() {
+            load_backends_from_path(&lib_dir);
+            return;
+        }
+    }
+
+    // Strategy 3: compile-time embedded path
     if let Some(dir) = BACKENDS_DIR {
-        load_backends_from_path(std::path::Path::new(dir));
+        let path = std::path::Path::new(dir);
+        if path.is_dir() {
+            load_backends_from_path(path);
+            return;
+        }
     }
 }
 
