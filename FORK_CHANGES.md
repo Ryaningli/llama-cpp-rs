@@ -5,7 +5,7 @@
 
 ## 改动概览
 
-共修改 5 个文件，新增 1 个 feature，改进 backends 部署体验。
+共修改 6 个文件，新增 1 个 feature，改进 backends 部署体验，修复 zigbuild 交叉编译兼容性。
 
 ### 1. 新增 feature: `dynamic-backends-no-variants`
 
@@ -69,6 +69,20 @@
 修复方式：在 `hard_link` 前无条件 `remove_file`（忽略"文件不存在"错误）。
 
 涉及 3 处相同模式（target 目录、examples、deps）。
+
+### 5. 依赖修复: `hf-hub` TLS 后端切换为 rustls
+
+**原问题：** 上游 `hf-hub` 默认使用 `native-tls`（依赖系统 OpenSSL），
+在使用 `cargo zigbuild` 交叉编译时找不到 OpenSSL 头文件导致构建失败。
+
+**改动：** 在 workspace `Cargo.toml` 中将 `hf-hub` 改为 `default-features = false`，
+显式启用 `rustls-tls`、`tokio`、`ureq`。`rustls` 是纯 Rust 实现的 TLS，无系统依赖。
+
+| 文件 | 改动 |
+|------|------|
+| `Cargo.toml` | `hf-hub` 依赖改为 `default-features = false, features = ["rustls-tls", "tokio", "ureq"]` |
+
+影响所有使用 `hf-hub` 的 example（simple、embeddings、reranker、server）。
 
 ## 合入注意事项
 
