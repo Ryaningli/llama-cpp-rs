@@ -5,7 +5,7 @@
 
 ## 改动概览
 
-共修改 6 个文件，新增 1 个 feature，改进 backends 部署体验，修复 zigbuild 交叉编译兼容性。
+共修改 7 个源码文件（不含 Cargo.lock），新增 3 个 feature，改进 backends 部署体验，修复 zigbuild 交叉编译兼容性。
 
 ### 1. 新增 feature: `dynamic-backends-no-variants`
 
@@ -29,11 +29,33 @@
 
 | 文件 | 改动 |
 |------|------|
-| `llama-cpp-sys-2/build.rs:~830` | `GGML_CPU_ALL_VARIANTS` 条件化，`no-variants` 时不设置 |
+| `llama-cpp-sys-2/build.rs` | `GGML_CPU_ALL_VARIANTS` 条件化，`no-variants` 时不设置 |
 | `llama-cpp-2/src/llama_backend.rs` | 新增 `find_lib_dir()` + 重写 `load_backends()` 多策略搜索 |
-| `examples/simple/src/main.rs:~174` | 添加 `#[cfg(feature = "dynamic-backends")] load_backends()` 调用 |
+| `examples/simple/src/main.rs` | 添加 `#[cfg(feature = "dynamic-backends")] load_backends()` 调用 |
 
-### 2. Backends 与共享库统一目录部署
+### 2. 新增 feature: `prebuilt-dynamic-backends`
+
+基于 `dynamic-backends-no-variants`，启用时跳过 CMake 编译 llama.cpp，
+直接链接到用户提供的预构建共享库（`libllama.so`、`libggml.so`、`libggml-base.so`）。
+
+用户通过 `RUSTFLAGS="-L /path/to/lib"` 或 `.cargo/config.toml` 提供库搜索路径，
+build.rs 不硬编码任何路径。运行时 backends 通过 `dladdr` 自动发现。
+
+**修改文件链：**
+
+| 文件 | 改动 |
+|------|------|
+| `llama-cpp-sys-2/Cargo.toml` | +1 行 feature 定义 |
+| `llama-cpp-2/Cargo.toml` | +1 行 feature 透传 |
+| `examples/simple/Cargo.toml` | +1 行 feature 透传 |
+
+**逻辑修改：**
+
+| 文件 | 改动 |
+|------|------|
+| `llama-cpp-sys-2/build.rs` | 在 `common_wrapper_build.compile()` 前后各插入一个 `cfg!(feature = "prebuilt-dynamic-backends")` 块：生成 `build-info.cpp` + 声明链接库 + `return` 跳过 CMake |
+
+### 3. Backends 与共享库统一目录部署
 
 **原问题：** 上游将 backends 安装到 `out/backends/` 子目录，需要单独设置 `LD_LIBRARY_PATH` 指向 backends 目录，部署时需要两条路径配置。
 
@@ -41,10 +63,9 @@
 
 | 文件 | 改动 |
 |------|------|
-| `llama-cpp-sys-2/build.rs:~823` | `GGML_BACKEND_DIR` 改为 `out_dir.join("lib")` |
-| `llama-cpp-sys-2/build.rs:~846` | `cargo:backends_dir` 也改为 `out/lib/` |
+| `llama-cpp-sys-2/build.rs` | `GGML_BACKEND_DIR` 改为 `out_dir.join("lib")`，`cargo:backends_dir` 也改为 `out/lib/` |
 
-### 3. `load_backends()` 多策略自动发现
+### 4. `load_backends()` 多策略自动发现
 
 `load_backends()` 现在按以下优先级查找 backends 目录：
 
@@ -52,14 +73,13 @@
 2. `libllama.so` 所在目录（通过 `dladdr` 自动检测，Unix 平台）
 3. 编译时嵌入的 `BACKENDS_DIR`
 
-这使得生产部署时无需额外配置 backends 路径——只要 `libggml-cpu.so` 等文件和 `libllama.so` 在同一目录（由上面的改动 2 保证），就会被自动发现。
+这使得生产部署时无需额外配置 backends 路径——只要 `libggml-cpu.so` 等文件和 `libllama.so` 在同一目录（由上面的改动 3 保证），就会被自动发现。
 
 | 文件 | 改动 |
 |------|------|
-| `llama-cpp-2/src/llama_backend.rs` | 新增 `find_lib_dir()` 函数（Unix 上使用 `dladdr`） |
-| `llama-cpp-2/src/llama_backend.rs` | 重写 `load_backends()` 实现多策略搜索 |
+| `llama-cpp-2/src/llama_backend.rs` | 新增 `find_lib_dir()` 函数（Unix 上使用 `dladdr`），重写 `load_backends()` |
 
-### 4. Bug 修复: build.rs hard_link 竞态条件
+### 5. Bug 修复: build.rs hard_link 竞态条件
 
 `llama-cpp-sys-2/build.rs` 硬链接共享库部分：
 
@@ -70,7 +90,7 @@
 
 涉及 3 处相同模式（target 目录、examples、deps）。
 
-### 5. 依赖修复: `hf-hub` TLS 后端切换为 rustls
+### 6. 依赖修复: `hf-hub` TLS 后端切换为 rustls
 
 **原问题：** 上游 `hf-hub` 默认使用 `native-tls`（依赖系统 OpenSSL），
 在使用 `cargo zigbuild` 交叉编译时找不到 OpenSSL 头文件导致构建失败。
@@ -82,29 +102,63 @@
 |------|------|
 | `Cargo.toml` | `hf-hub` 依赖改为 `default-features = false, features = ["rustls-tls", "tokio", "ureq"]` |
 
-影响所有使用 `hf-hub` 的 example（simple、embeddings、reranker、server）。
+## 代码改动约束
+
+> 所有后续改动必须遵循以下原则，以保持与上游 `utilityai/llama-cpp-rs` 的可合入性。
+
+### 原则 1：优先易于合入，而非代码优雅
+
+- **不提取公共函数**：即使 prebuilt 分支和 CMake 分支有相似的平台链接逻辑，也不抽取为共享函数。提取函数会改动上游代码结构，增加合并冲突范围。
+- **不重构上游代码**：不重命名变量、不调整代码顺序、不添加抽象层。上游代码保持原样，我们的改动作为"插件"插入。
+- **接受适度重复**：代码重复（如平台链接 match 块）优于改动上游代码结构。
+
+### 原则 2：纯新增优于修改
+
+- **优先添加新代码块**：prebuilt feature 的实现方式是在现有代码之间插入 `if cfg!(feature = "prebuilt-dynamic-backends") { ... return; }` 块，通过 early return 跳过后面的 CMake 流程，而不是修改 CMake 流程本身。
+- **新增 feature 不修改现有 feature 行为**：`dynamic-backends-no-variants` 和 `prebuilt-dynamic-backends` 只在各自的 `cfg!` 块内生效，不影响原有 `dynamic-backends` 的行为。
+- **Cargo.toml 只做纯行追加**：feature 定义在文件末尾追加，不修改现有 feature 行。
+
+### 原则 3：最小化改动行数
+
+- **改动行数越少越好**：每多改一行上游代码，就多一行可能的合并冲突。
+- **只改动必要的行**：backends 目录从 `out/backends/` 改为 `out/lib/` 是必要的语义变更（改变了运行时行为），无法避免。`GGML_CPU_ALL_VARIANTS` 条件化只加了一行 `if !cfg!(...)` 包裹。
+- **不改无关代码**：不同时做格式化、注释清理、变量重命名等。
+
+### 原则 4：改动集中在已知区域
+
+当前所有改动集中在以下区域，上游合并时只需关注这些位置：
+
+| 区域 | 文件:行范围 | 改动性质 |
+|------|-------------|----------|
+| prebuilt build-info | `build.rs:~522-539` | 纯新增 |
+| prebuilt 链接 | `build.rs:~543-580` | 纯新增 |
+| backends CMake 配置 | `build.rs:~879-900` | 最小修改（3 行改 5 行） |
+| backends_dir 输出 | `build.rs:~900` | 1 行修改 |
+| hard_link 修复 | `build.rs:~1165-1180` | 每处 2 行改 2 行 |
+| load_backends 重写 | `llama_backend.rs:~200-279` | 函数替换（区域独立） |
+| feature 定义 | 各 `Cargo.toml` | 纯行追加 |
 
 ## 合入注意事项
 
 ### 上游合并时可能冲突的位置
 
-1. **`llama-cpp-sys-2/build.rs` 第 823-835 行**
+1. **`llama-cpp-sys-2/build.rs` 第 879-900 行**
    - `dynamic-backends` CMake 配置块
-   - 我们改动：`GGML_BACKEND_DIR` 指向 `out/lib/` 而非 `out/backends/`
+   - 我们改动：`GGML_BACKEND_DIR` 指向 `out/lib/` 而非 `out/backends/`，`GGML_CPU_ALL_VARIANTS` 条件化
    - 如果上游修改了此区域的 CMake 参数，需要保留我们的改动
 
-2. **`llama-cpp-sys-2/build.rs` 第 1108-1128 行**
+2. **`llama-cpp-sys-2/build.rs` 第 1165-1180 行**
    - hard_link 复制逻辑
    - 如果上游重构了这段代码（比如改用 `std::fs::copy`），合并时优先采用上游方式，
      但需确保也修复了 `EEXIST` 竞态问题
 
-3. **`llama-cpp-2/src/llama_backend.rs` 第 183-250 行**
-   - `#[cfg]` 条件、`find_lib_dir()`、`load_backends()` 重写
-   - 如果上游修改了此区域的 API，需要保留 dladdr 回退逻辑和 cfg 条件
+3. **`llama-cpp-2/src/llama_backend.rs` 第 200-279 行**
+   - `find_lib_dir()`、`load_backends()` 重写
+   - 如果上游修改了此区域的 API，需要保留 dladdr 回退逻辑和多策略搜索
 
 4. **`examples/simple/Cargo.toml` 和 `examples/simple/src/main.rs`**
    - 上游可能重构 example 结构或添加新 feature
-   - 合并时确保 `dynamic-backends-no-variants` 透传和 `load_backends()` 调用不丢失
+   - 合并时确保 feature 透传和 `load_backends()` 调用不丢失
 
 ### 合入策略
 
@@ -138,14 +192,38 @@ cargo build --release -p simple --features dynamic-backends-no-variants
 ## 运行命令
 
 ```bash
+# === CMake 构建（本地编译 llama.cpp）===
+
 # 带 CPU 变体（原行为，构建多种微架构版本）
 cargo build --release -p simple --features dynamic-backends
 
-# 不带 CPU 变体（新增，只构建通用版本）
+# 不带 CPU 变体（只构建通用版本）
 cargo build --release -p simple --features dynamic-backends-no-variants
 
 # 运行（只需一个 LD_LIBRARY_PATH）
 LIB_DIR=$(ls -d target/release/build/llama-cpp-sys-2-*/out/lib | tail -1) \
 LD_LIBRARY_PATH="$LIB_DIR" \
 ./target/release/simple -p "你好" --n-len 64 local /path/to/model.gguf
+
+# === 预构建库（跳过 CMake，链接外部 .so）===
+
+# 构建（通过 RUSTFLAGS 提供库搜索路径）
+RUSTFLAGS="-L /path/to/llama-cpp/lib -L /path/to/openmp/lib" \
+cargo build --release -p simple --features prebuilt-dynamic-backends
+
+# 或在 .cargo/config.toml 中配置（一次设置永久生效）：
+# [target.x86_64-unknown-linux-gnu]
+# rustflags = ["-L", "/path/to/llama-cpp/lib", "-L", "/path/to/openmp/lib"]
+#
+# 然后直接：
+cargo build --release -p simple --features prebuilt-dynamic-backends
+
+# 运行
+LD_LIBRARY_PATH=/path/to/llama-cpp/lib \
+./target/release/simple -p "你好" --n-len 64 local /path/to/model.gguf
+
+# === 交叉编译（zigbuild）===
+
+RUSTFLAGS="-L /path/to/llama-cpp/lib -L /path/to/openmp/lib" \
+cargo zigbuild --release -p simple --target x86_64-unknown-linux-gnu --features prebuilt-dynamic-backends
 ```

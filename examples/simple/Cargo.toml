@@ -21,6 +21,7 @@ vulkan = ["llama-cpp-2/vulkan"]
 dynamic-link = ["llama-cpp-2/dynamic-link"]
 dynamic-backends = ["llama-cpp-2/dynamic-backends"]
 dynamic-backends-no-variants = ["dynamic-backends", "llama-cpp-2/dynamic-backends-no-variants"]
+prebuilt-dynamic-backends = ["dynamic-backends-no-variants", "llama-cpp-2/prebuilt-dynamic-backends"]
 
 [lints]
 workspace = true

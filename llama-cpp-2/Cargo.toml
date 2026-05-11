@@ -43,6 +43,7 @@ system-ggml-static = ["llama-cpp-sys-2/system-ggml-static"]
 llguidance = ["dep:llguidance", "dep:toktrie"]
 dynamic-backends = ["llama-cpp-sys-2/dynamic-backends"]
 dynamic-backends-no-variants = ["dynamic-backends", "llama-cpp-sys-2/dynamic-backends-no-variants"]
+prebuilt-dynamic-backends = ["dynamic-backends-no-variants", "llama-cpp-sys-2/prebuilt-dynamic-backends"]
 
 
 [target.'cfg(all(target_os = "macos", any(target_arch = "aarch64", target_arch = "arm64")))'.dependencies]

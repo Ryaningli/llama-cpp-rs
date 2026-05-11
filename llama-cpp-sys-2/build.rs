@@ -519,7 +519,65 @@ fn main() {
         common_wrapper_build.cpp_link_stdlib(None);
     }
 
+    // When using prebuilt libraries, generate build-info.cpp (normally done by CMake)
+    // and compile it alongside the wrapper, then skip CMake entirely.
+    if cfg!(feature = "prebuilt-dynamic-backends") {
+        let build_info_path = out_dir.join("build-info.cpp");
+        std::fs::write(
+            &build_info_path,
+            "int LLAMA_BUILD_NUMBER = 0;\nconst char * LLAMA_COMMIT = \"prebuilt\";\n",
+        )
+        .expect("Failed to write build-info.cpp");
+
+        let mut build_info_build = cc::Build::new();
+        build_info_build
+            .cpp(true)
+            .file(&build_info_path)
+            .include(llama_src.join("include"))
+            .pic(true);
+        build_info_build.compile("llama_cpp_sys_2_build_info");
+    }
+
     common_wrapper_build.compile("llama_cpp_sys_2_common_wrapper");
+
+    // When using prebuilt libraries, skip CMake entirely.
+    // Users must provide the library search path via RUSTFLAGS or .cargo/config.toml, e.g.:
+    //   RUSTFLAGS="-L /path/to/llama-cpp/lib"
+    //   # or in .cargo/config.toml:
+    //   [target.x86_64-unknown-linux-gnu]
+    //   rustflags = ["-L", "/path/to/llama-cpp/lib"]
+    if cfg!(feature = "prebuilt-dynamic-backends") {
+        println!("cargo:rustc-link-lib=dylib=llama");
+        println!("cargo:rustc-link-lib=dylib=ggml");
+        println!("cargo:rustc-link-lib=dylib=ggml-base");
+
+        if cfg!(feature = "mtmd") {
+            println!("cargo:rustc-link-lib=dylib=mtmd");
+        }
+
+        if cfg!(feature = "openmp") && target_triple.contains("gnu") {
+            println!("cargo:rustc-link-lib=gomp");
+        }
+
+        match target_os {
+            TargetOs::Linux => {
+                println!("cargo:rustc-link-lib=dylib=stdc++");
+            }
+            TargetOs::Apple(_) => {
+                println!("cargo:rustc-link-lib=framework=Foundation");
+                println!("cargo:rustc-link-lib=framework=Metal");
+                println!("cargo:rustc-link-lib=framework=MetalKit");
+                println!("cargo:rustc-link-lib=framework=Accelerate");
+                println!("cargo:rustc-link-lib=c++");
+            }
+            TargetOs::Windows(WindowsVariant::Msvc) => {
+                println!("cargo:rustc-link-lib=advapi32");
+            }
+            _ => {}
+        }
+
+        return;
+    }
 
     // Build with Cmake
 
